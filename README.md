@@ -53,7 +53,12 @@ telegram:
   # Telegram Bot API token (get from @BotFather)
   bot_token: "YOUR_BOT_TOKEN_HERE"
 
-  # Telegram chat ID to send alerts to (can be a user or group chat ID)
+  # Telegram chat ID to send alerts to (can be a user or group chat ID).
+  # To find your personal chat_id:
+  #   1. Open Telegram and send /start to your bot.
+  #   2. Visit https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+  #   3. Look for "chat": {"id": <number>} in the response – that number is your chat_id.
+  # For a group, add the bot to the group, send any message, then use the same getUpdates URL.
   chat_id: "YOUR_CHAT_ID_HERE"
 ```
 

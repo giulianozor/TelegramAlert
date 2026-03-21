@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,6 +194,49 @@ func TestBuildMessage_ContainsExpectedFields(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message missing %q\nmessage: %s", want, msg)
 		}
+	}
+}
+
+// ---- sendTelegramMessage ----
+
+func TestSendTelegramMessage_ChatNotFound(t *testing.T) {
+	// Spin up a local HTTP server that mimics the Telegram API "chat not found" response.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`)
+	}))
+	defer srv.Close()
+
+	// Patch the API URL by using the test server's URL as the token so that the
+	// constructed URL points to our local server.
+	// We do this by replacing the apiURL construction inside sendTelegramMessage
+	// via a thin wrapper that accepts a custom base URL.
+	err := sendTelegramMessageWithBase(srv.URL+"/bot", "99999", "hello")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("expected helpful hint in error message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/start") {
+		t.Errorf("expected /start guidance in error message, got: %v", err)
+	}
+}
+
+func TestSendTelegramMessage_OtherError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"ok":false,"error_code":401,"description":"Unauthorized"}`)
+	}))
+	defer srv.Close()
+
+	err := sendTelegramMessageWithBase(srv.URL+"/bot", "99999", "hello")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// Non-"chat not found" errors should NOT include the hint.
+	if strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("unexpected hint in error message for non-chat-not-found error: %v", err)
 	}
 }
 

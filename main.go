@@ -134,9 +134,25 @@ func buildMessage(files []FileInfo, folder string, minAge, maxAge time.Duration)
 	return sb.String()
 }
 
+// telegramAPIError holds the structured error response returned by the Telegram Bot API.
+type telegramAPIError struct {
+	OK          bool   `json:"ok"`
+	ErrorCode   int    `json:"error_code"`
+	Description string `json:"description"`
+}
+
 // sendTelegramMessage sends a Markdown-formatted message via the Telegram Bot API.
 func sendTelegramMessage(botToken, chatID, message string) error {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", url.PathEscape(botToken))
+	baseURL := fmt.Sprintf("https://api.telegram.org/bot%s", url.PathEscape(botToken))
+	return sendTelegramMessageWithBase(baseURL, chatID, message)
+}
+
+// sendTelegramMessageWithBase sends a message using the given API base URL.
+// The base URL must include the full path up to (but not including) the method name,
+// e.g. "https://api.telegram.org/bot<TOKEN>".
+// It is separated from sendTelegramMessage to allow substituting a test HTTP server.
+func sendTelegramMessageWithBase(baseURL, chatID, message string) error {
+	apiURL := baseURL + "/sendMessage"
 
 	payload := map[string]string{
 		"chat_id":    chatID,
@@ -156,6 +172,16 @@ func sendTelegramMessage(botToken, chatID, message string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		var apiErr telegramAPIError
+		if json.Unmarshal(respBody, &apiErr) == nil && strings.Contains(apiErr.Description, "chat not found") {
+			return fmt.Errorf("Telegram API returned HTTP %d: %s\n"+
+				"Hint: chat_id %q was not found. "+
+				"If you are using your personal user ID, you must first send /start to your bot "+
+				"so that it can initiate a conversation with you. "+
+				"You can then retrieve the correct chat_id by calling: "+
+				"https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates",
+				resp.StatusCode, string(respBody), chatID)
+		}
 		return fmt.Errorf("Telegram API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
