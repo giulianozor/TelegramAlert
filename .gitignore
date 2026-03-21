@@ -1,0 +1,6 @@
+# Build artifacts
+telegram-alert
+TelegramAlert
+
+# Configuration files with secrets
+config.yml
