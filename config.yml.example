@@ -1,0 +1,22 @@
+# TelegramAlert Configuration Example
+# Copy this file to config.yml and update the values
+
+monitor:
+  # Folder path to monitor for file changes
+  folder: /var/log/myapp
+
+  # Minimum file age in minutes (files must be at least this old)
+  min_age_minutes: 5
+
+  # Maximum file age in minutes (files must have been modified within this window)
+  max_age_minutes: 60
+
+  # How often to repeat the check, in minutes
+  check_interval_minutes: 10
+
+telegram:
+  # Telegram Bot API token (get from @BotFather)
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+
+  # Telegram chat ID to send alerts to (can be a user or group chat ID)
+  chat_id: "YOUR_CHAT_ID_HERE"
