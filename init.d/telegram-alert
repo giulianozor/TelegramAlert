@@ -19,7 +19,33 @@ LOGFILE="/var/log/${NAME}.log"
 DAEMON_USER="root"
 # ----------------------------------------------------------------------------
 
-. /lib/lsb/init-functions
+if [ -f /lib/lsb/init-functions ]; then
+    . /lib/lsb/init-functions
+else
+    log_daemon_msg() { echo "$1"; }
+    log_failure_msg() { echo "FAIL: $1" >&2; }
+    log_end_msg() { [ "$1" -eq 0 ] && echo "OK" || echo "FAIL"; }
+    status_of_proc() {
+        local pid_file="" daemon="" name="" pid=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -p) shift; pid_file="$1" ;;
+                *)  [ -z "$daemon" ] && daemon="$1" || name="$1" ;;
+            esac
+            shift
+        done
+        if [ -f "$pid_file" ]; then
+            pid=$(cat "$pid_file")
+        fi
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "$name is running"
+            return 0
+        else
+            echo "$name is not running"
+            return 1
+        fi
+    }
+fi
 
 do_start() {
     log_daemon_msg "Starting $NAME"
