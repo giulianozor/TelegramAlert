@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -141,6 +142,53 @@ type telegramAPIError struct {
 	Description string `json:"description"`
 }
 
+// telegramUpdate represents a single update from the Telegram Bot API getUpdates endpoint.
+type telegramUpdate struct {
+	Message *telegramUpdateMessage `json:"message"`
+}
+
+// telegramUpdateMessage holds message and sender details from a Telegram update.
+type telegramUpdateMessage struct {
+	Chat struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+	From *struct {
+		ID int64 `json:"id"`
+	} `json:"from"`
+}
+
+// telegramHTTPClient is used for outgoing Telegram API requests with a fixed timeout.
+var telegramHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// findChatIDFromUpdates calls the getUpdates endpoint and returns the first chat ID
+// found where the sender's user ID matches targetUserID. Returns 0 if not found.
+func findChatIDFromUpdates(baseURL string, targetUserID int64) int64 {
+	resp, err := telegramHTTPClient.Get(baseURL + "/getUpdates") //nolint:noctx
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("warning: reading getUpdates response: %v", err)
+		return 0
+	}
+
+	var result struct {
+		OK     bool             `json:"ok"`
+		Result []telegramUpdate `json:"result"`
+	}
+	if json.Unmarshal(body, &result) != nil || !result.OK {
+		return 0
+	}
+	for _, u := range result.Result {
+		if u.Message != nil && u.Message.From != nil && u.Message.From.ID == targetUserID {
+			return u.Message.Chat.ID
+		}
+	}
+	return 0
+}
+
 // sendTelegramMessage sends a Markdown-formatted message via the Telegram Bot API.
 func sendTelegramMessage(botToken, chatID, message string) error {
 	baseURL := fmt.Sprintf("https://api.telegram.org/bot%s", url.PathEscape(botToken))
@@ -152,6 +200,14 @@ func sendTelegramMessage(botToken, chatID, message string) error {
 // e.g. "https://api.telegram.org/bot<TOKEN>".
 // It is separated from sendTelegramMessage to allow substituting a test HTTP server.
 func sendTelegramMessageWithBase(baseURL, chatID, message string) error {
+	return doSendTelegramMessage(baseURL, chatID, message, true)
+}
+
+// doSendTelegramMessage performs the actual HTTP send. When tryFallback is true and
+// the API returns "chat not found", it queries getUpdates to resolve the chat ID for
+// the given user ID and retries once. This handles the common case where the caller
+// configures their Telegram user ID as chat_id.
+func doSendTelegramMessage(baseURL, chatID, message string, tryFallback bool) error {
 	apiURL := baseURL + "/sendMessage"
 
 	payload := map[string]string{
@@ -174,6 +230,15 @@ func sendTelegramMessageWithBase(baseURL, chatID, message string) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		var apiErr telegramAPIError
 		if json.Unmarshal(respBody, &apiErr) == nil && strings.Contains(apiErr.Description, "chat not found") {
+			if tryFallback {
+				if userID, parseErr := strconv.ParseInt(strings.TrimSpace(chatID), 10, 64); parseErr == nil {
+					if resolvedChatID := findChatIDFromUpdates(baseURL, userID); resolvedChatID != 0 {
+						log.Printf("chat_id %q not found directly; retrying with chat_id %d found in getUpdates",
+							chatID, resolvedChatID)
+						return doSendTelegramMessage(baseURL, strconv.FormatInt(resolvedChatID, 10), message, false)
+					}
+				}
+			}
 			return fmt.Errorf("Telegram API returned HTTP %d: %s\n"+
 				"Hint: chat_id %q was not found. "+
 				"If you are using your personal user ID, you must first send /start to your bot "+

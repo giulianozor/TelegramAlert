@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -201,16 +202,21 @@ func TestBuildMessage_ContainsExpectedFields(t *testing.T) {
 
 func TestSendTelegramMessage_ChatNotFound(t *testing.T) {
 	// Spin up a local HTTP server that mimics the Telegram API "chat not found" response.
+	// Both /sendMessage and /getUpdates return "chat not found" / empty updates, so the
+	// fallback cannot resolve the chat and the hint must appear.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`)
+		switch r.URL.Path {
+		case "/bot/sendMessage":
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`)
+		case "/bot/getUpdates":
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 
-	// Patch the API URL by using the test server's URL as the token so that the
-	// constructed URL points to our local server.
-	// We do this by replacing the apiURL construction inside sendTelegramMessage
-	// via a thin wrapper that accepts a custom base URL.
 	err := sendTelegramMessageWithBase(srv.URL+"/bot", "99999", "hello")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -220,6 +226,40 @@ func TestSendTelegramMessage_ChatNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "/start") {
 		t.Errorf("expected /start guidance in error message, got: %v", err)
+	}
+}
+
+func TestSendTelegramMessage_ChatNotFound_FallbackSucceeds(t *testing.T) {
+	// getUpdates returns a message from user 99999 whose chat ID is 99999 (private chat).
+	// The second sendMessage call (retry) should succeed.
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bot/sendMessage":
+			n := atomic.AddInt32(&callCount, 1)
+			if n == 1 {
+				// First attempt: fail with chat not found.
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`)
+			} else {
+				// Retry attempt: succeed.
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+			}
+		case "/bot/getUpdates":
+			// Return one update where from.id and chat.id both equal 99999.
+			fmt.Fprint(w, `{"ok":true,"result":[{"message":{"chat":{"id":99999},"from":{"id":99999}}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	err := sendTelegramMessageWithBase(srv.URL+"/bot", "99999", "hello")
+	if err != nil {
+		t.Fatalf("expected success after fallback, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 2 {
+		t.Errorf("expected 2 sendMessage calls (initial + retry), got %d", got)
 	}
 }
 
@@ -237,6 +277,44 @@ func TestSendTelegramMessage_OtherError(t *testing.T) {
 	// Non-"chat not found" errors should NOT include the hint.
 	if strings.Contains(err.Error(), "Hint:") {
 		t.Errorf("unexpected hint in error message for non-chat-not-found error: %v", err)
+	}
+}
+
+// ---- findChatIDFromUpdates ----
+
+func TestFindChatIDFromUpdates_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true,"result":[{"message":{"chat":{"id":12345},"from":{"id":99999}}}]}`)
+	}))
+	defer srv.Close()
+
+	got := findChatIDFromUpdates(srv.URL, 99999)
+	if got != 12345 {
+		t.Errorf("findChatIDFromUpdates: got %d, want 12345", got)
+	}
+}
+
+func TestFindChatIDFromUpdates_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true,"result":[{"message":{"chat":{"id":11111},"from":{"id":22222}}}]}`)
+	}))
+	defer srv.Close()
+
+	got := findChatIDFromUpdates(srv.URL, 99999)
+	if got != 0 {
+		t.Errorf("findChatIDFromUpdates: got %d, want 0 (not found)", got)
+	}
+}
+
+func TestFindChatIDFromUpdates_EmptyResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	got := findChatIDFromUpdates(srv.URL, 99999)
+	if got != 0 {
+		t.Errorf("findChatIDFromUpdates: got %d, want 0 (empty result)", got)
 	}
 }
 
