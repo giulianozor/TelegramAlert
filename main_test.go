@@ -166,6 +166,31 @@ func TestScanFolder_ExcludesTooOld(t *testing.T) {
 	}
 }
 
+func TestScanFolder_IgnoresSubfolders(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file in a subdirectory with a matching mod time.
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	subFile := filepath.Join(sub, "nested.log")
+	writeFile(t, subFile, "data")
+	tenMinAgo := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(subFile, tenMinAgo, tenMinAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	// Window [5 min, 60 min] would match the file if subdirs were scanned.
+	files, err := scanFolder(dir, 5*time.Minute, 60*time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected 0 files (subdir must be ignored), got %d: %v", len(files), files)
+	}
+}
+
 func TestScanFolder_NonexistentFolder(t *testing.T) {
 	_, err := scanFolder("/nonexistent/folder/xyz", 5*time.Minute, 60*time.Minute)
 	if err == nil {
