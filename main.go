@@ -87,11 +87,16 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-// scanFolder returns all regular files inside folder whose modification time
-// falls within the window [now - maxAge, now - minAge].
+// scanFolder returns all regular files directly inside folder (non-recursive)
+// whose modification time falls within the window [now - maxAge, now - minAge].
 func scanFolder(folder string, minAge, maxAge time.Duration) ([]FileInfo, error) {
 	if _, err := os.Stat(folder); err != nil {
 		return nil, fmt.Errorf("folder %q: %w", folder, err)
+	}
+
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return nil, fmt.Errorf("reading folder %q: %w", folder, err)
 	}
 
 	now := time.Now()
@@ -99,25 +104,25 @@ func scanFolder(folder string, minAge, maxAge time.Duration) ([]FileInfo, error)
 	newest := now.Add(-minAge)
 
 	var matched []FileInfo
-	err := filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			log.Printf("warning: cannot access %q: %v", path, err)
-			return nil // continue walking
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if info.IsDir() {
-			return nil
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("warning: cannot access %q: %v", entry.Name(), err)
+			continue
 		}
 		mod := info.ModTime()
 		if !mod.Before(oldest) && !mod.After(newest) {
 			matched = append(matched, FileInfo{
-				Path:    path,
+				Path:    filepath.Join(folder, entry.Name()),
 				Size:    info.Size(),
 				ModTime: mod,
 			})
 		}
-		return nil
-	})
-	return matched, err
+	}
+	return matched, nil
 }
 
 // buildMessage formats the list of matched files into a Telegram message string.
