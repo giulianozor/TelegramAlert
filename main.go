@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -139,9 +138,12 @@ func buildMessage(files []FileInfo, folder string, minAge, maxAge time.Duration)
 	return sb.String()
 }
 
+// telegramHTTPClient is the shared HTTP client used to talk to the Telegram API.
+var telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 // sendTelegramMessage sends a Markdown-formatted message via the Telegram Bot API.
 func sendTelegramMessage(botToken, chatID, message string) error {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", url.PathEscape(botToken))
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
 	payload := map[string]string{
 		"chat_id":    chatID,
@@ -153,7 +155,13 @@ func sendTelegramMessage(botToken, chatID, message string) error {
 		return fmt.Errorf("marshalling payload: %w", err)
 	}
 
-	resp, err := http.Post(apiURL, "application/json", bytes.NewReader(body)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := telegramHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("posting to Telegram API: %w", err)
 	}

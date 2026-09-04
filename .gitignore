@@ -1,0 +1,10 @@
+# Compiled binary
+telegram-alert
+TelegramAlert
+
+# Config
+config.yml
+
+# Editor/OS files
+.DS_Store
+*.swp
