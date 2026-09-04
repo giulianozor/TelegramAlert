@@ -225,7 +225,9 @@ func (f FileInfo) key() fileKey {
 
 // runCheck performs one scan-and-alert cycle. Files already reported (tracked
 // in alerted) are skipped so the same file is not alerted on every interval.
-// Entries older than maxAge are pruned since they can never match again.
+// A file is only added to alerted after a successful send, so a transient
+// send failure is retried on a later interval. Entries older than maxAge are
+// pruned since they can never match again.
 func runCheck(cfg *Config, alerted map[fileKey]struct{}) {
 	minAge := time.Duration(cfg.Monitor.MinAgeMinutes) * time.Minute
 	maxAge := time.Duration(cfg.Monitor.MaxAgeMinutes) * time.Minute
@@ -252,12 +254,10 @@ func runCheck(cfg *Config, alerted map[fileKey]struct{}) {
 
 	var fresh []FileInfo
 	for _, f := range files {
-		k := f.key()
-		if _, ok := alerted[k]; ok {
+		if _, ok := alerted[f.key()]; ok {
 			continue
 		}
 		fresh = append(fresh, f)
-		alerted[k] = struct{}{}
 	}
 
 	if len(fresh) == 0 {
@@ -270,6 +270,14 @@ func runCheck(cfg *Config, alerted map[fileKey]struct{}) {
 	if err := sendTelegramMessage(cfg.Telegram.BotToken, cfg.Telegram.ChatID, msg); err != nil {
 		log.Printf("error sending Telegram message: %v", err)
 		return
+	}
+
+	// Only mark the files as alerted after a successful send. Marking them
+	// before would lose the alert permanently on a transient send failure,
+	// because they would be skipped on every subsequent retry until they age
+	// out of the window.
+	for _, f := range fresh {
+		alerted[f.key()] = struct{}{}
 	}
 	log.Println("Telegram alert sent successfully")
 }

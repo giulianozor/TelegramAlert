@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -307,6 +308,50 @@ func TestRunCheck_DeduplicatesFiles(t *testing.T) {
 	runCheck(cfg, alerted)
 	if len(sent) != 1 {
 		t.Fatalf("expected no additional send on second run, got %d sends", len(sent))
+	}
+}
+
+func TestRunCheck_RetriesAfterFailedSend(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "retry.log")
+	writeFile(t, f, "data")
+	tenMinAgo := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(f, tenMinAgo, tenMinAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		Monitor: MonitorConfig{
+			Folder:               dir,
+			MinAgeMinutes:        5,
+			MaxAgeMinutes:        60,
+			CheckIntervalMinutes: 10,
+		},
+		Telegram: TelegramConfig{BotToken: "tok", ChatID: "123"},
+	}
+
+	var sends int
+	sendTelegramMessage = func(_, _, _ string) error {
+		sends++
+		return errors.New("telegram down")
+	}
+	defer func() { sendTelegramMessage = sendTelegramMessageImpl }()
+
+	alerted := make(map[fileKey]struct{})
+
+	// First run: send fails, so the file must NOT be recorded as alerted.
+	runCheck(cfg, alerted)
+	if sends != 1 {
+		t.Fatalf("expected 1 failed send, got %d", sends)
+	}
+	if len(alerted) != 0 {
+		t.Fatalf("expected file not recorded after failed send, got %d recorded", len(alerted))
+	}
+
+	// Second run: send still fails but the file must be attempted again.
+	runCheck(cfg, alerted)
+	if sends != 2 {
+		t.Fatalf("expected a retry send on second run, got %d sends", sends)
 	}
 }
 
