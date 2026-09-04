@@ -6,7 +6,7 @@ files are found.
 
 ## Features
 
-- Monitors a directory recursively for files modified within a configurable time window
+- Monitors a directory (non-recursive, top-level only) for files modified within a configurable time window
 - Sends formatted Telegram messages via the Bot API
 - Runs as a background service with init.d support
 - Configurable check interval
@@ -16,7 +16,7 @@ files are found.
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.24 or later
 - A [Telegram Bot token](https://core.telegram.org/bots#botfather) and a chat ID
 
 ### Build
@@ -24,8 +24,10 @@ files are found.
 ```bash
 git clone https://github.com/giulianozor/TelegramAlert.git
 cd TelegramAlert
-go build -o telegram-alert .
+make build
 ```
+
+This produces the `telegram-alert` binary. Alternatively run `go build -o telegram-alert .` directly.
 
 ## Configuration
 
@@ -81,8 +83,8 @@ Use the `-config` flag to specify a different path:
 
 ## Running as a Service
 
-An init.d script is provided in the `init.d` file. Install and configure it
-according to your distribution's init system to run TelegramAlert as a daemon
+An init.d script is provided at `init.d/telegram-alert`. Install and configure
+it according to your distribution's init system to run TelegramAlert as a daemon
 that starts automatically on boot.
 
 ## Development
@@ -92,3 +94,6 @@ Run the test suite:
 ```bash
 go test ./...
 ```
+
+The Makefile provides `build`, `test`, `vet`, `lint`, `fmt`, `install`, `run` and
+`clean` targets.
