@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- loadConfig / validateConfig ----
@@ -216,6 +217,96 @@ func TestBuildMessage_ContainsExpectedFields(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message missing %q\nmessage: %s", want, msg)
 		}
+	}
+}
+
+// ---- buildMessage: truncation ----
+
+func TestBuildMessage_TruncatesLongOutput(t *testing.T) {
+	var files []FileInfo
+	for i := 0; i < 2000; i++ {
+		files = append(files, FileInfo{
+			Path:    "/var/log/app/" + strings.Repeat("x", 200) + ".log",
+			Size:    12345,
+			ModTime: time.Now().Add(-10 * time.Minute),
+		})
+	}
+	msg := buildMessage(files, "/var/log/app", 5*time.Minute, 60*time.Minute)
+	if len(msg) > telegramMaxMessageBytes {
+		t.Fatalf("message length %d exceeds limit %d", len(msg), telegramMaxMessageBytes)
+	}
+	if !strings.Contains(msg, "2000 matching file(s)") {
+		t.Errorf("expected original file count in header, got: %.100s", msg)
+	}
+}
+
+func TestTruncateMessage_RuneBoundary(t *testing.T) {
+	// A multi-byte rune (🔔 = 4 bytes) placed exactly on the boundary.
+	in := strings.Repeat("a", telegramMaxMessageBytes-2) + "🔔"
+	out := truncateMessage(in)
+	if len(out) > telegramMaxMessageBytes {
+		t.Fatalf("output length %d exceeds limit %d", len(out), telegramMaxMessageBytes)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("expected truncation marker, got: %s", out)
+	}
+	// No invalid UTF-8 in output.
+	if !utf8.ValidString(out) {
+		t.Error("output contains invalid UTF-8")
+	}
+}
+
+func TestTruncateMessage_NoOpUnderLimit(t *testing.T) {
+	in := "short message"
+	if got := truncateMessage(in); got != in {
+		t.Errorf("expected unchanged message, got %q", got)
+	}
+}
+
+// ---- runCheck: dedup ----
+
+func TestRunCheck_DeduplicatesFiles(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "dup.log")
+	writeFile(t, f, "data")
+	tenMinAgo := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(f, tenMinAgo, tenMinAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		Monitor: MonitorConfig{
+			Folder:               dir,
+			MinAgeMinutes:        5,
+			MaxAgeMinutes:        60,
+			CheckIntervalMinutes: 10,
+		},
+		Telegram: TelegramConfig{BotToken: "tok", ChatID: "123"},
+	}
+
+	// First run: file is new and should be scheduled for an alert, so runCheck
+	// must record it in the alerted set regardless of send result. We stub the
+	// sender to capture the message and always succeed.
+	var sent []string
+	sendTelegramMessage = func(_, _, msg string) error {
+		sent = append(sent, msg)
+		return nil
+	}
+	defer func() { sendTelegramMessage = sendTelegramMessageImpl }()
+
+	alerted := make(map[fileKey]struct{})
+	runCheck(cfg, alerted)
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 send on first run, got %d", len(sent))
+	}
+	if len(alerted) != 1 {
+		t.Fatalf("expected 1 recorded file, got %d", len(alerted))
+	}
+
+	// Second run: same file must be skipped (no new alert).
+	runCheck(cfg, alerted)
+	if len(sent) != 1 {
+		t.Fatalf("expected no additional send on second run, got %d sends", len(sent))
 	}
 }
 

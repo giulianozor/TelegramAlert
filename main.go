@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -124,7 +125,36 @@ func scanFolder(folder string, minAge, maxAge time.Duration) ([]FileInfo, error)
 	return matched, nil
 }
 
+// telegramMaxMessageBytes is Telegram's sendMessage payload limit.
+const telegramMaxMessageBytes = 4096
+
+// truncationMarker is appended when a message is trimmed to the payload limit.
+const truncationMarker = "\n… (truncated)"
+
+// truncateMessage trims message so its UTF-8 byte length stays within the
+// Telegram payload limit, including the truncation marker. It never splits a
+// multi-byte rune.
+func truncateMessage(message string) string {
+	if len(message) <= telegramMaxMessageBytes {
+		return message
+	}
+	cut := message[:telegramMaxMessageBytes-len(truncationMarker)]
+	if !utf8.ValidString(cut) {
+		// Back off until the truncated slice ends on a rune boundary.
+		for i := len(cut) - 1; i >= 0; i-- {
+			if utf8.RuneStart(cut[i]) {
+				cut = cut[:i]
+				break
+			}
+		}
+	} else if cut[len(cut)-1] == '\n' {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + truncationMarker
+}
+
 // buildMessage formats the list of matched files into a Telegram message string.
+// The result is truncated to stay within Telegram's payload limit.
 func buildMessage(files []FileInfo, folder string, minAge, maxAge time.Duration) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🔔 *TelegramAlert*\n"))
@@ -132,17 +162,26 @@ func buildMessage(files []FileInfo, folder string, minAge, maxAge time.Duration)
 	sb.WriteString(fmt.Sprintf("Window: %v – %v ago\n\n", minAge, maxAge))
 	sb.WriteString(fmt.Sprintf("%d matching file(s):\n", len(files)))
 	for _, f := range files {
-		age := time.Since(f.ModTime).Round(time.Second)
-		sb.WriteString(fmt.Sprintf("• `%s`\n  Size: %d bytes | Age: %v\n", f.Path, f.Size, age))
+		line := fmt.Sprintf("• `%s`\n  Size: %d bytes | Age: %v\n", f.Path, f.Size, time.Since(f.ModTime).Round(time.Second))
+		if sb.Len()+len(line) > telegramMaxMessageBytes {
+			break
+		}
+		sb.WriteString(line)
 	}
-	return sb.String()
+	sb.WriteString("\n")
+	return truncateMessage(sb.String())
 }
 
 // telegramHTTPClient is the shared HTTP client used to talk to the Telegram API.
 var telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
-// sendTelegramMessage sends a Markdown-formatted message via the Telegram Bot API.
-func sendTelegramMessage(botToken, chatID, message string) error {
+// sendTelegramMessage is the package-level sender hook. Production code uses
+// sendTelegramMessageImpl; tests can swap it to avoid network calls.
+var sendTelegramMessage = sendTelegramMessageImpl
+
+// sendTelegramMessageImpl sends a Markdown-formatted message via the Telegram
+// Bot API. It is assigned to sendTelegramMessage so tests can stub the sender.
+func sendTelegramMessageImpl(botToken, chatID, message string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
 	payload := map[string]string{
@@ -174,8 +213,20 @@ func sendTelegramMessage(botToken, chatID, message string) error {
 	return nil
 }
 
-// runCheck performs one scan-and-alert cycle.
-func runCheck(cfg *Config) {
+// fileKey is a stable identity for a matched file (path + modification time).
+type fileKey struct {
+	path    string
+	modNano int64
+}
+
+func (f FileInfo) key() fileKey {
+	return fileKey{path: f.Path, modNano: f.ModTime.UnixNano()}
+}
+
+// runCheck performs one scan-and-alert cycle. Files already reported (tracked
+// in alerted) are skipped so the same file is not alerted on every interval.
+// It returns the set of files actually reported in this cycle.
+func runCheck(cfg *Config, alerted map[fileKey]struct{}) map[fileKey]struct{} {
 	minAge := time.Duration(cfg.Monitor.MinAgeMinutes) * time.Minute
 	maxAge := time.Duration(cfg.Monitor.MaxAgeMinutes) * time.Minute
 
@@ -185,21 +236,32 @@ func runCheck(cfg *Config) {
 	files, err := scanFolder(cfg.Monitor.Folder, minAge, maxAge)
 	if err != nil {
 		log.Printf("error scanning folder: %v", err)
-		return
+		return alerted
 	}
 
-	if len(files) == 0 {
-		log.Println("no matching files found")
-		return
+	var fresh []FileInfo
+	for _, f := range files {
+		k := f.key()
+		if _, ok := alerted[k]; ok {
+			continue
+		}
+		fresh = append(fresh, f)
+		alerted[k] = struct{}{}
 	}
 
-	log.Printf("found %d matching file(s); sending Telegram alert", len(files))
-	msg := buildMessage(files, cfg.Monitor.Folder, minAge, maxAge)
+	if len(fresh) == 0 {
+		log.Println("no new matching files found")
+		return alerted
+	}
+
+	log.Printf("found %d new matching file(s); sending Telegram alert", len(fresh))
+	msg := buildMessage(fresh, cfg.Monitor.Folder, minAge, maxAge)
 	if err := sendTelegramMessage(cfg.Telegram.BotToken, cfg.Telegram.ChatID, msg); err != nil {
 		log.Printf("error sending Telegram message: %v", err)
-		return
+		return alerted
 	}
 	log.Println("Telegram alert sent successfully")
+	return alerted
 }
 
 func main() {
@@ -218,7 +280,8 @@ func main() {
 	log.Printf("TelegramAlert started – monitoring %q every %v", cfg.Monitor.Folder, interval)
 
 	// Run an immediate check, then repeat on the configured interval.
-	runCheck(cfg)
+	alerted := make(map[fileKey]struct{})
+	runCheck(cfg, alerted)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -230,7 +293,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			runCheck(cfg)
+			runCheck(cfg, alerted)
 		case sig := <-sigCh:
 			log.Printf("received signal %v; shutting down", sig)
 			return
