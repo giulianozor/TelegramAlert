@@ -147,7 +147,7 @@ func truncateMessage(message string) string {
 				break
 			}
 		}
-	} else if cut[len(cut)-1] == '\n' {
+	} else if len(cut) > 0 && cut[len(cut)-1] == '\n' {
 		cut = cut[:len(cut)-1]
 	}
 	return cut + truncationMarker
@@ -157,7 +157,7 @@ func truncateMessage(message string) string {
 // The result is truncated to stay within Telegram's payload limit.
 func buildMessage(files []FileInfo, folder string, minAge, maxAge time.Duration) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🔔 *TelegramAlert*\n"))
+	sb.WriteString("🔔 *TelegramAlert*\n")
 	sb.WriteString(fmt.Sprintf("Folder: `%s`\n", folder))
 	sb.WriteString(fmt.Sprintf("Window: %v – %v ago\n\n", minAge, maxAge))
 	sb.WriteString(fmt.Sprintf("%d matching file(s):\n", len(files)))
@@ -225,18 +225,29 @@ func (f FileInfo) key() fileKey {
 
 // runCheck performs one scan-and-alert cycle. Files already reported (tracked
 // in alerted) are skipped so the same file is not alerted on every interval.
-// It returns the set of files actually reported in this cycle.
-func runCheck(cfg *Config, alerted map[fileKey]struct{}) map[fileKey]struct{} {
+// Entries older than maxAge are pruned since they can never match again.
+func runCheck(cfg *Config, alerted map[fileKey]struct{}) {
 	minAge := time.Duration(cfg.Monitor.MinAgeMinutes) * time.Minute
 	maxAge := time.Duration(cfg.Monitor.MaxAgeMinutes) * time.Minute
 
 	log.Printf("scanning %q for files modified between %v and %v ago …",
 		cfg.Monitor.Folder, minAge, maxAge)
 
+	// Drop tracked files whose modtime has fallen outside the window. They are
+	// past their maxAge and will never match again, so keeping them would leak
+	// memory on a long-running daemon. Do this before scanning so it also runs
+	// when the folder is temporarily unreadable.
+	now := time.Now()
+	for k := range alerted {
+		if now.Sub(time.Unix(0, k.modNano)) > maxAge {
+			delete(alerted, k)
+		}
+	}
+
 	files, err := scanFolder(cfg.Monitor.Folder, minAge, maxAge)
 	if err != nil {
 		log.Printf("error scanning folder: %v", err)
-		return alerted
+		return
 	}
 
 	var fresh []FileInfo
@@ -251,17 +262,16 @@ func runCheck(cfg *Config, alerted map[fileKey]struct{}) map[fileKey]struct{} {
 
 	if len(fresh) == 0 {
 		log.Println("no new matching files found")
-		return alerted
+		return
 	}
 
 	log.Printf("found %d new matching file(s); sending Telegram alert", len(fresh))
 	msg := buildMessage(fresh, cfg.Monitor.Folder, minAge, maxAge)
 	if err := sendTelegramMessage(cfg.Telegram.BotToken, cfg.Telegram.ChatID, msg); err != nil {
 		log.Printf("error sending Telegram message: %v", err)
-		return alerted
+		return
 	}
 	log.Println("Telegram alert sent successfully")
-	return alerted
 }
 
 func main() {

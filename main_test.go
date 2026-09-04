@@ -310,6 +310,30 @@ func TestRunCheck_DeduplicatesFiles(t *testing.T) {
 	}
 }
 
+func TestRunCheck_PrunesExpiredEntries(t *testing.T) {
+	cfg := &Config{
+		Monitor: MonitorConfig{
+			Folder:               "/does/not/matter",
+			MinAgeMinutes:        1,
+			MaxAgeMinutes:        10,
+			CheckIntervalMinutes: 5,
+		},
+		Telegram: TelegramConfig{BotToken: "tok", ChatID: "123"},
+	}
+
+	// A file whose mtime is well beyond maxAge must be pruned on the next scan.
+	alerted := map[fileKey]struct{}{
+		{path: "/old/file.log", modNano: time.Now().Add(-2 * time.Hour).UnixNano()}: {},
+	}
+
+	// scanFolder will fail since the folder doesn't exist, but the pruning loop
+	// runs before scanning returns, so the expired entry should be gone.
+	runCheck(cfg, alerted)
+	if len(alerted) != 0 {
+		t.Fatalf("expected expired entries to be pruned, got %d remaining: %v", len(alerted), alerted)
+	}
+}
+
 // ---- helpers ----
 
 func writeTempFile(t *testing.T, content string) string {
